@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/services.dart';
+import 'splash_screen.dart';
 import 'package:tflite_v2/tflite_v2.dart';
 
 void main() async {
@@ -18,9 +20,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: RealTimeObjectDetection(
-        cameras: cameras,
-      ),
+      home: SplashScreen(cameras: cameras),
     );
   }
 }
@@ -31,8 +31,7 @@ class RealTimeObjectDetection extends StatefulWidget {
   RealTimeObjectDetection({required this.cameras});
 
   @override
-  _RealTimeObjectDetectionState createState() =>
-      _RealTimeObjectDetectionState();
+  _RealTimeObjectDetectionState createState() => _RealTimeObjectDetectionState();
 }
 
 class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
@@ -41,28 +40,52 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
   List<dynamic>? recognitions;
   int imageHeight = 0;
   int imageWidth = 0;
+  String currentModel = 'SSDMobileNet';
+  bool isProcessing = false;
+  FlutterTts flutterTts = FlutterTts();
+  bool isSpeaking = false;
+  bool isFlashOn = false; // Para controlar la linterna
 
   @override
   void initState() {
     super.initState();
-    loadModel();
-    initializeCamera(null);
+    initializeCamera();
+    loadModel(currentModel);
+    configureTts();
   }
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  void configureTts() async {
+    await flutterTts.setLanguage("es-ES");
+    await flutterTts.setPitch(1.0);
+    await flutterTts.setSpeechRate(0.5);
   }
 
-  Future<void> loadModel() async {
-    String? res = await Tflite.loadModel(
-      model: 'assets/detect.tflite',
-      labels: 'assets/labelmap.txt',
-    );
-    setState(() {
-      isModelLoaded = res != null;
-    });
+  Future<void> loadModel(String modelName) async {
+    String? modelPath;
+    String? labelPath;
+
+    if (modelName == 'SSDMobileNet') {
+      modelPath = 'assets/detect.tflite';
+      labelPath = 'assets/labelmap.txt';
+    } else if (modelName == 'BilletesModel') {
+      modelPath = 'assets/model.tflite';
+      labelPath = 'assets/labels.txt';
+    }
+
+    try {
+      String? res = await Tflite.loadModel(
+        model: modelPath!,
+        labels: labelPath!,
+      );
+      setState(() {
+        isModelLoaded = res != null;
+      });
+    } catch (e) {
+      print("Error al cargar el modelo: $e");
+      setState(() {
+        isModelLoaded = false;
+      });
+    }
   }
 
   void toggleCamera() {
@@ -70,10 +93,10 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
     CameraDescription newDescription;
     if (lensDirection == CameraLensDirection.front) {
       newDescription = widget.cameras.firstWhere((description) =>
-          description.lensDirection == CameraLensDirection.back);
+      description.lensDirection == CameraLensDirection.back);
     } else {
       newDescription = widget.cameras.firstWhere((description) =>
-          description.lensDirection == CameraLensDirection.front);
+      description.lensDirection == CameraLensDirection.front);
     }
 
     if (newDescription != null) {
@@ -83,7 +106,7 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
     }
   }
 
-  void initializeCamera(description) async {
+  void initializeCamera([description]) async {
     if (description == null) {
       _controller = CameraController(
         widget.cameras[0],
@@ -104,7 +127,7 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
       return;
     }
     _controller.startImageStream((CameraImage image) {
-      if (isModelLoaded) {
+      if (isModelLoaded && !isProcessing) {
         runModel(image);
       }
     });
@@ -112,24 +135,61 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
   }
 
   void runModel(CameraImage image) async {
-    if (image.planes.isEmpty) return;
+    if (image.planes.isEmpty || isProcessing) return;
+
+    setState(() {
+      isProcessing = true;
+    });
 
     var recognitions = await Tflite.detectObjectOnFrame(
       bytesList: image.planes.map((plane) => plane.bytes).toList(),
-      model: 'SSDMobileNet',
+      model: currentModel == 'SSDMobileNet' ? 'SSDMobileNet' : 'model.tflite',
       imageHeight: image.height,
       imageWidth: image.width,
       imageMean: 127.5,
       imageStd: 127.5,
-      numResultsPerClass: 1,
-      threshold: 0.4,
+      numResultsPerClass: 2,
+      threshold: 0.5,
     );
 
     setState(() {
       this.recognitions = recognitions;
-      // imageHeight = image.height;
-      // imageWidth = image.width;
+      isProcessing = false;
     });
+
+    if (recognitions != null && recognitions.isNotEmpty && !isSpeaking) {
+      describeObject(recognitions[0]["detectedClass"], recognitions[0]["confidenceInClass"]);
+    }
+  }
+
+  void describeObject(String detectedClass, double confidence) async {
+    setState(() {
+      isSpeaking = true;
+    });
+
+    String description = 'Detectado: $detectedClass con ${(confidence * 100).toStringAsFixed(0)}% de confianza';
+    await flutterTts.speak(description);
+
+    flutterTts.setCompletionHandler(() {
+      setState(() {
+        isSpeaking = false;
+      });
+    });
+  }
+
+  void toggleFlash() async {
+    if (_controller.value.isInitialized) {
+      try {
+        await _controller.setFlashMode(
+          isFlashOn ? FlashMode.off : FlashMode.torch,
+        );
+        setState(() {
+          isFlashOn = !isFlashOn;
+        });
+      } catch (e) {
+        print("Error al cambiar el modo de flash: $e");
+      }
+    }
   }
 
   @override
@@ -138,43 +198,33 @@ class _RealTimeObjectDetectionState extends State<RealTimeObjectDetection> {
       return Container();
     }
     return Scaffold(
-      appBar: AppBar(
-        title: Text('Real-time Object Detection'),
-      ),
-      body: Column(
-        // mainAxisAlignment: MainAxisAlignment.center,
-
+      body: Stack(
         children: [
-          Container(
-            width: MediaQuery.of(context).size.width,
-            height: MediaQuery.of(context).size.height * 0.8,
-            child: Stack(
-              children: [
-                CameraPreview(_controller),
-                if (recognitions != null)
-                  BoundingBoxes(
-                    recognitions: recognitions!,
-                    previewH: imageHeight.toDouble(),
-                    previewW: imageWidth.toDouble(),
-                    screenH: MediaQuery.of(context).size.height * 0.8,
-                    screenW: MediaQuery.of(context).size.width,
-                  ),
-              ],
+          // La cámara ocupa toda la pantalla
+          Positioned.fill(
+            child: CameraPreview(_controller),
+          ),
+          if (recognitions != null)
+            BoundingBoxes(
+              recognitions: recognitions!,
+              previewH: imageHeight.toDouble(),
+              previewW: imageWidth.toDouble(),
+              screenH: MediaQuery.of(context).size.height,
+              screenW: MediaQuery.of(context).size.width,
+            ),
+          // Botón de flash
+          Positioned(
+            top: 30,
+            right: 20,
+            child: IconButton(
+              icon: Icon(
+                isFlashOn ? Icons.flash_on : Icons.flash_off,
+                color: Colors.white,
+                size: 30,
+              ),
+              onPressed: toggleFlash,
             ),
           ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                  onPressed: () {
-                    toggleCamera();
-                  },
-                  icon: Icon(
-                    Icons.camera_front,
-                    size: 30,
-                  ))
-            ],
-          )
         ],
       ),
     );
@@ -218,7 +268,7 @@ class BoundingBoxes extends StatelessWidget {
               ),
             ),
             child: Text(
-              "${rec["detectedClass"]} ${(rec["confidenceInClass"] * 100).toStringAsFixed(0)}% Width:${(w).ceil()} Heght: ${h.ceil()}",
+              "${rec["detectedClass"]} ${(rec["confidenceInClass"] * 100).toStringAsFixed(0)}% Width: ${(w).ceil()} Height: ${(h).ceil()}",
               style: TextStyle(
                 color: Colors.red,
                 fontSize: 15,
